@@ -1562,3 +1562,71 @@ func TestCancelAccept(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestCloseRead(t *testing.T) {
+	client, server := testClientServer()
+	defer client.Close()
+	defer server.Close()
+
+	stream, err := client.OpenStream()
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	defer stream.Close()
+
+	stream2, err := server.Accept()
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	defer stream2.Close()
+
+	if _, err := stream.Write([]byte("test")); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, 4)
+	if _, err := stream2.Read(buf); err != nil {
+		t.Fatal(err)
+	} else if !bytes.Equal(buf, []byte("test")) {
+		t.Fatalf("got data %q, want %q", buf, "test")
+	}
+
+	if err := stream2.(*Stream).CloseRead(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := stream.Write([]byte("test")); err != ErrReadClosed {
+		t.Fatalf("expected EOF, got %v", err)
+	}
+}
+
+func TestCloseWrite(t *testing.T) {
+	client, server := testClientServer()
+	defer client.Close()
+	defer server.Close()
+
+	stream, err := client.OpenStream()
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	defer stream.Close()
+
+	stream2, err := server.Accept()
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	defer stream2.Close()
+
+	if _, err := stream.Write([]byte("test")); err != nil {
+		t.Fatal(err)
+	} else if err := stream.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := io.ReadAll(stream2)
+	if err != nil {
+		t.Fatal(err)
+	} else if !bytes.Equal(data, []byte("test")) {
+		t.Fatalf("got data %q, want %q", data, "test")
+	}
+}

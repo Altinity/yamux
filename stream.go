@@ -34,6 +34,11 @@ type Stream struct {
 	state     streamState
 	stateLock sync.Mutex
 
+	remoteStoppedReading bool
+	remoteStoppedWriting bool
+	localStoppedReading  bool
+	localStoppedWriting  bool
+
 	recvBuf  *bytes.Buffer
 	recvLock sync.Mutex
 
@@ -113,6 +118,15 @@ START:
 		s.stateLock.Unlock()
 		return 0, ErrConnectionReset
 	}
+	if s.remoteStoppedWriting {
+		s.recvLock.Lock()
+		if s.recvBuf == nil || s.recvBuf.Len() == 0 {
+			s.recvLock.Unlock()
+			s.stateLock.Unlock()
+			return 0, io.EOF
+		}
+		s.recvLock.Unlock()
+	}
 	s.stateLock.Unlock()
 
 	// If there is no data available, block
@@ -185,6 +199,10 @@ START:
 	case streamReset:
 		s.stateLock.Unlock()
 		return 0, ErrConnectionReset
+	}
+	if s.remoteStoppedReading {
+		s.stateLock.Unlock()
+		return 0, ErrReadClosed
 	}
 	s.stateLock.Unlock()
 
@@ -366,6 +384,108 @@ SEND_CLOSE:
 	return nil
 }
 
+// CloseRead is used to close this side's read end of the stream.
+func (s *Stream) CloseRead() error {
+	s.stateLock.Lock()
+	switch s.state {
+	// Opened means we need to signal a close
+	case streamSYNSent:
+		fallthrough
+	case streamSYNReceived:
+		fallthrough
+	case streamEstablished:
+		goto SEND_CLOSE
+
+	case streamLocalClose:
+		goto SEND_CLOSE
+	case streamRemoteClose:
+	case streamClosed:
+	case streamReset:
+	default:
+		panic("unhandled state")
+	}
+	s.stateLock.Unlock()
+	return nil
+SEND_CLOSE:
+	s.stateLock.Unlock()
+	s.sendCloseRead()
+	s.notifyWaiting()
+	return nil
+}
+
+// sendCloseRead is used to send a read close notice
+func (s *Stream) sendCloseRead() error {
+	s.controlHdrLock.Lock()
+	defer s.controlHdrLock.Unlock()
+
+	if s.localStoppedReading {
+		return nil
+	}
+
+	flags := s.sendFlags()
+	flags |= flagCloseRead
+
+	s.controlHdr.encode(typeWindowUpdate, flags, s.id, 0)
+	if err := s.session.waitForSendErr(s.controlHdr, nil, s.controlErr); err != nil {
+		return err
+	}
+
+	s.localStoppedReading = true
+
+	return nil
+}
+
+// CloseWrite is used to close this side's write end of the stream.
+func (s *Stream) CloseWrite() error {
+	s.stateLock.Lock()
+	switch s.state {
+	// Opened means we need to signal a close
+	case streamSYNSent:
+		fallthrough
+	case streamSYNReceived:
+		fallthrough
+	case streamEstablished:
+		goto SEND_CLOSE
+
+	case streamLocalClose:
+	case streamRemoteClose:
+		goto SEND_CLOSE
+	case streamClosed:
+	case streamReset:
+	default:
+		panic("unhandled state")
+	}
+	s.stateLock.Unlock()
+	return nil
+SEND_CLOSE:
+	s.stateLock.Unlock()
+	s.sendCloseWrite()
+	s.notifyWaiting()
+	return nil
+}
+
+// sendCloseWrite is used to send a write close notice
+func (s *Stream) sendCloseWrite() error {
+	s.controlHdrLock.Lock()
+	defer s.controlHdrLock.Unlock()
+
+	if s.localStoppedWriting {
+		return nil
+	}
+
+	flags := s.sendFlags()
+	flags |= flagCloseWrite
+
+	s.controlHdr.encode(typeWindowUpdate, flags, s.id, 0)
+	if err := s.session.waitForSendErr(s.controlHdr, nil, s.controlErr); err != nil {
+		return err
+	}
+
+	s.localStoppedWriting = true
+
+	return nil
+}
+
 // closeTimeout is called after StreamCloseTimeout during a close to
 // close this stream.
 func (s *Stream) closeTimeout() {
@@ -416,6 +536,22 @@ func (s *Stream) processFlags(flags uint16) error {
 		}
 		asyncNotify(s.establishCh)
 		s.session.establishStream(s.id)
+	}
+	if (flags & flagCloseWrite) == flagCloseWrite {
+		s.remoteStoppedWriting = true
+		if s.remoteStoppedReading {
+			s.state = streamClosed
+			closeStream = true
+		}
+		s.notifyWaiting()
+	}
+	if (flags & flagCloseRead) == flagCloseRead {
+		s.remoteStoppedReading = true
+		if s.remoteStoppedWriting {
+			s.state = streamClosed
+			closeStream = true
+		}
+		s.notifyWaiting()
 	}
 	if flags&flagFIN == flagFIN {
 		switch s.state {

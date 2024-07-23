@@ -1,3 +1,3 @@
-module github.com/hashicorp/yamux
+module github.com/altinity/yamux
 
 go 1.15

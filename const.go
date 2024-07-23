@@ -76,6 +76,9 @@ var (
 
 	// ErrKeepAliveTimeout is sent if a missed keepalive caused the stream close
 	ErrKeepAliveTimeout = fmt.Errorf("keepalive timeout")
+
+	// ErrReadClosed is returned when using a closed read end of a stream
+	ErrReadClosed = fmt.Errorf("remote read end of stream closed")
 )
 
 const (
@@ -118,6 +121,15 @@ const (
 
 	// RST is used to hard close a given stream.
 	flagRST
+
+	// flagCloseWrite is sent to notify the remote end
+	// that no more data will be written to the stream.
+	// May be sent with a data payload.
+	flagCloseWrite
+
+	// flagCloseRead is sent to notify the remote end
+	// that no more data will be read from the stream.
+	flagCloseRead
 )
 
 const (
